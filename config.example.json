@@ -1,0 +1,7 @@
+{
+  "bot_token": "YOUR_BOT_TOKEN_HERE",
+  "user_id": "YOUR_USER_ID_HERE",
+  "base_url": "https://ilinkai.weixin.qq.com",
+  "db_path": "/Users/YOUKNOWWHO/Library/Application Support/WorkBuddy/automations/automations.db",
+  "poll_interval": 30
+}

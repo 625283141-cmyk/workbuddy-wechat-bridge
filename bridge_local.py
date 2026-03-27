@@ -1,20 +1,13 @@
 #!/usr/bin/env python3
 """
-WorkBuddy WeChat Bridge
-将 WorkBuddy 自动化任务结果通过 ilinkai 协议推送到微信
+WorkBuddy WeChat Bridge - Cassie 专用版
+凭证硬编码在文件顶部，不上传 Git
 
 使用方式：
-  python3 bridge.py                        # 启动桥接服务
-  python3 bridge.py --once                 # 单次轮询（用于测试）
-  python3 bridge.py --test "消息内容"      # 发送测试消息
-  python3 bridge.py --status               # 查看服务状态
-
-配置文件：
-  config.json - 必填，包含 ilinkai 凭证和 WorkBuddy 数据库路径
-  config.example.json - 配置模板
-
-安装开机自启：
-  bash install.sh
+  python3 bridge_local.py                        # 启动桥接服务
+  python3 bridge_local.py --once                 # 单次轮询（用于测试）
+  python3 bridge_local.py --test "消息内容"      # 发送测试消息
+  python3 bridge_local.py --status               # 查看服务状态
 """
 
 import argparse
@@ -34,11 +27,18 @@ from typing import Optional
 import aiosqlite
 import urllib.request
 
-# ─── 配置区 ────────────────────────────────────────────
-CONFIG_PATH = Path(__file__).parent / "config.json"
-LOG_DIR = Path(__file__).parent / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+# ─── Cassie 专属凭证（勿上传 Git）─────────────────────
+BOT_TOKEN = "271cd3e66797@im.bot:060000543474e63f0144e66fb181eda815f14b"
+USER_ID   = "o9cq8024h2lYygHTVskCVEp4eBLo@im.wechat"
+BASE_URL  = "https://ilinkai.weixin.qq.com"
+# ──────────────────────────────────────────────────────
 
+DB_PATH       = "/Users/YOUKNOWWHO/Library/Application Support/WorkBuddy/automations/automations.db"
+POLL_INTERVAL = 30  # 秒
+MAX_RETRIES   = 3
+
+LOG_DIR = Path.home() / "Library" / "Logs" / "WorkBuddyBridge"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -48,36 +48,16 @@ logging.basicConfig(
     ],
 )
 logger = logging.getLogger("wb-bridge")
-# ──────────────────────────────────────────────────────
 
 
-def load_config() -> dict:
-    """加载配置文件"""
-    if not CONFIG_PATH.exists():
-        raise FileNotFoundError(
-            f"配置文件不存在：{CONFIG_PATH}\n"
-            f"请复制 config.example.json 为 config.json，并填入你的凭证"
-        )
-    with open(CONFIG_PATH) as f:
-        return json.load(f)
-
-
-# ─── ilinkai API ──────────────────────────────────────
-def send_message(content: str, bot_token: str, user_id: str, base_url: str) -> bool:
-    """
-    通过 ilinkai 协议发送微信消息
-
-    协议关键点：
-    - AuthorizationType: ilink_bot_token
-    - X-WECHAT-UIN: 随机 base64 uin
-    - body.base_info.channel_version: "1.0.3"
-    - body.msg 结构：client_id 每次请求必须随机生成
-    """
+# ─── ilinkai API ──────────────────────────────────
+def send_message(content: str) -> bool:
+    """通过 ilinkai 协议发送微信消息"""
     uin_bytes = str(random.randint(0, 0xFFFFFFFF)).encode()
     headers = {
         "Content-Type": "application/json",
         "AuthorizationType": "ilink_bot_token",
-        "Authorization": f"Bearer {bot_token}",
+        "Authorization": f"Bearer {BOT_TOKEN}",
         "X-WECHAT-UIN": base64.b64encode(uin_bytes).decode(),
     }
 
@@ -85,7 +65,7 @@ def send_message(content: str, bot_token: str, user_id: str, base_url: str) -> b
         "base_info": {"channel_version": "1.0.3"},
         "msg": {
             "from_user_id": "",
-            "to_user_id": user_id,
+            "to_user_id": USER_ID,
             "client_id": f"wb-bridge-{uuid.uuid4().hex[:12]}",
             "message_type": 2,
             "message_state": 2,
@@ -98,7 +78,7 @@ def send_message(content: str, bot_token: str, user_id: str, base_url: str) -> b
     headers["Content-Length"] = str(len(raw))
 
     req = urllib.request.Request(
-        f"{base_url}/ilink/bot/sendmessage",
+        f"{BASE_URL}/ilink/bot/sendmessage",
         data=raw, headers=headers, method="POST"
     )
     ctx = ssl._create_unverified_context()
@@ -114,18 +94,18 @@ def send_message(content: str, bot_token: str, user_id: str, base_url: str) -> b
         return False
 
 
-# ─── 数据库监控 ───────────────────────────────────────
-async def poll_new_runs(db_path: str, last_run_id: Optional[str] = None) -> tuple[list, str]:
+# ─── 数据库监控 ────────────────────────────────────
+async def poll_new_runs(last_run_id: Optional[str] = None) -> tuple[list, str]:
     """检查新增的 ARCHIVED 自动化运行"""
-    if not os.path.exists(db_path):
-        logger.warning(f"数据库不存在：{db_path}")
+    if not os.path.exists(DB_PATH):
+        logger.warning(f"数据库不存在：{DB_PATH}")
         return [], last_run_id or ""
 
     new_runs = []
     latest_run_id = last_run_id or ""
 
     try:
-        async with aiosqlite.connect(db_path) as db:
+        async with aiosqlite.connect(DB_PATH) as db:
             db.row_factory = aiosqlite.Row
             rows = await db.execute_fetchall("""
                 SELECT automation_id, status, read_at, created_at
@@ -179,18 +159,13 @@ def build_message(run: dict) -> str:
     )
 
 
-# ─── 主循环 ────────────────────────────────────────────
-async def run(config: dict):
-    db_path = config["workbuddy"]["db_path"]
-    poll_interval = config["bridge"]["poll_interval"]
-    bot_token = config["wechat"]["bot_token"]
-    user_id = config["wechat"]["user_id"]
-    base_url = config["wechat"]["base_url"]
-
+# ─── 主循环 ────────────────────────────────────────
+async def run():
+    """主循环"""
     logger.info("=" * 50)
-    logger.info("WorkBuddy WeChat Bridge 已启动")
-    logger.info(f"轮询间隔：{poll_interval}秒")
-    logger.info(f"数据库：{db_path}")
+    logger.info("WorkBuddy WeChat Bridge 已启动（本地版）")
+    logger.info(f"轮询间隔：{POLL_INTERVAL}秒")
+    logger.info(f"数据库：{DB_PATH}")
     logger.info("按 Ctrl+C 停止")
     logger.info("=" * 50)
 
@@ -199,11 +174,11 @@ async def run(config: dict):
 
     while True:
         try:
-            new_runs, latest_id = await poll_new_runs(db_path, last_run_id)
+            new_runs, latest_id = await poll_new_runs(last_run_id)
 
             for run in reversed(new_runs):
                 msg = build_message(run)
-                ok = send_message(msg, bot_token, user_id, base_url)
+                ok = send_message(msg)
                 if ok:
                     logger.info(f"通知已发送: {run['run_id']}")
                 else:
@@ -221,23 +196,18 @@ async def run(config: dict):
             await asyncio.sleep(60)
             errors = 0
 
-        await asyncio.sleep(poll_interval)
+        await asyncio.sleep(POLL_INTERVAL)
 
 
-# ─── CLI ──────────────────────────────────────────────
-def cmd_test(config: dict, message: str):
+# ─── CLI ───────────────────────────────────────────
+def cmd_test(message: str):
     logger.info(f"发送测试消息：{message}")
-    ok = send_message(
-        message,
-        config["wechat"]["bot_token"],
-        config["wechat"]["user_id"],
-        config["wechat"]["base_url"]
-    )
+    ok = send_message(message)
     print("✅ 发送成功！请检查微信。" if ok else "❌ 发送失败，请查看日志。")
 
 
-def cmd_once(config: dict):
-    tasks, _ = asyncio.run(poll_new_runs(config["workbuddy"]["db_path"], None))
+def cmd_once():
+    tasks, _ = asyncio.run(poll_new_runs(None))
     if not tasks:
         print("没有新的已完成任务。")
     else:
@@ -247,14 +217,12 @@ def cmd_once(config: dict):
             print(f"  [{ts.strftime('%H:%M')}] {t['automation_id']}")
 
 
-def cmd_status(config: dict):
-    db_path = config["workbuddy"]["db_path"]
-    print("=== WorkBuddy WeChat Bridge 状态 ===")
-    print(f"配置文件：{CONFIG_PATH}")
-    print(f"数据库：{db_path}")
-    print(f"数据库存在：{os.path.exists(db_path)}")
-    if os.path.exists(db_path):
-        conn = sqlite3.connect(db_path)
+def cmd_status():
+    print("=== 状态 ===")
+    print(f"数据库：{DB_PATH}")
+    print(f"数据库存在：{os.path.exists(DB_PATH)}")
+    if os.path.exists(DB_PATH):
+        conn = sqlite3.connect(DB_PATH)
         cur = conn.execute(
             "SELECT COUNT(*) FROM automation_runs WHERE status='ARCHIVED' AND read_at IS NOT NULL"
         )
@@ -262,28 +230,18 @@ def cmd_status(config: dict):
         conn.close()
 
 
-def main():
+if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="WorkBuddy WeChat Bridge")
-    parser.add_argument("--once", action="store_true", help="单次轮询后退出")
-    parser.add_argument("--test", type=str, help="发送测试消息")
-    parser.add_argument("--status", action="store_true", help="查看状态")
+    parser.add_argument("--once", action="store_true")
+    parser.add_argument("--test", type=str)
+    parser.add_argument("--status", action="store_true")
     args = parser.parse_args()
 
-    try:
-        config = load_config()
-    except FileNotFoundError as e:
-        print(e)
-        return
-
     if args.test:
-        cmd_test(config, args.test)
+        cmd_test(args.test)
     elif args.status:
-        cmd_status(config)
+        cmd_status()
     elif args.once:
-        cmd_once(config)
+        cmd_once()
     else:
-        asyncio.run(run(config))
-
-
-if __name__ == "__main__":
-    main()
+        asyncio.run(run())
